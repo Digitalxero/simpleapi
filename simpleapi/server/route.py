@@ -16,8 +16,11 @@ __all__ = ('Route', )
 class RouteException(Exception): pass
 class Route(object):
 
-    def __init__(self, *namespaces):
+    def __init__(self, *namespaces, **kwargs):
+        """Takes at least one namespace. 
+        """
         self.nmap = {}
+        self.restful = kwargs.get('restful', False)
 
         for namespace in namespaces:
             self.add_namespace(namespace)
@@ -214,8 +217,10 @@ class Route(object):
 
         return version
 
-    def __call__(self, http_request):
+    def __call__(self, http_request, **urlparameters):
         request_items = dict(http_request.REQUEST.items())
+        request_items.update(urlparameters)
+        
         version = request_items.pop('_version', 'default')
         callback = request_items.pop('_callback', None)
         output_formatter = request_items.pop('_output', None)
@@ -282,7 +287,8 @@ class Route(object):
                 output_formatter=output_formatter_instance,
                 wrapper=wrapper_instance,
                 callback=callback,
-                mimetype=mimetype
+                mimetype=mimetype,
+                restful=self.restful
             )
             response = request.run(request_items)
             http_response = response.build()
@@ -302,8 +308,9 @@ class Route(object):
                 msgs.append(u'------- Traceback follows -------')
                 for idx, item in enumerate(trace):
                     msgs.append(u"(%s)\t%s:%s (%s)" % (idx+1, item[3], item[2], item[1]))
-                    for line in item[4]:
-                        msgs.append(u"\t\t%s" % line.strip())
+                    if item[4]:
+                        for line in item[4]:
+                            msgs.append(u"\t\t%s" % line.strip())
                     msgs.append('') # blank line
                 msgs.append('     -- End of traceback --     ')
                 msgs.append('')

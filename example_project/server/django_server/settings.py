@@ -22,8 +22,8 @@ CACHE_BACKEND = 'locmem://'
 TIME_ZONE = 'Europe/Berlin'
 
 INSTALLED_APPS = (
-	'api',
-	'ajax_client'
+    'api',
+    'ajax_client'
 )
 
 MIDDLEWARE_CLASSES = (
@@ -34,8 +34,8 @@ MIDDLEWARE_CLASSES = (
 )
 
 TEMPLATE_CONTEXT_PROCESSORS = (
-	"django.core.context_processors.request",
-	"django.core.context_processors.auth",
+    "django.core.context_processors.request",
+    "django.core.context_processors.auth",
 )
 
 #
@@ -43,17 +43,17 @@ TEMPLATE_CONTEXT_PROCESSORS = (
 #
 
 try:
-	SECRET_KEY
+    SECRET_KEY
 except NameError:
-	SECRET_FILE = os.path.join(PROJECT_ROOT, 'secret.txt')
-	try:
-		SECRET_KEY = open(SECRET_FILE).read().strip()
-	except IOError:
-		try:
-			from random import choice
-			SECRET_KEY = ''.join([choice('abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*(-_=+)') for i in range(50)])
-			secret = file(SECRET_FILE, 'w')
-			secret.write(SECRET_KEY)
-			secret.close()
-		except IOError:
-			Exception('Please create a %s file with random characters to generate your secret key!' % SECRET_FILE)
+    SECRET_FILE = os.path.join(PROJECT_ROOT, 'secret.txt')
+    try:
+        SECRET_KEY = open(SECRET_FILE).read().strip()
+    except IOError:
+        try:
+            from random import choice
+            SECRET_KEY = ''.join([choice('abcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*(-_=+)') for i in range(50)])
+            secret = file(SECRET_FILE, 'w')
+            secret.write(SECRET_KEY)
+            secret.close()
+        except IOError:
+            Exception('Please create a %s file with random characters to generate your secret key!' % SECRET_FILE)

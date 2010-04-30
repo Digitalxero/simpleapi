@@ -3,6 +3,10 @@
 __all__ = ('wrappers', 'Wrapper')
 
 class WrappersSingleton(object):
+    """This singleton takes care of all registered wrappers. You can easily 
+    register your own wrapper for use in both the Namespace and python client.
+    """
+
     _wrappers = {}
 
     def __new__(cls):
@@ -17,10 +21,10 @@ class WrappersSingleton(object):
             Register the given wrapper
         """
         if not isinstance(wrapper(None, None), Wrapper):
-            raise TypeError(u"You can only register a Wrapper not a {item|r}".format(item=wrapper))
+            raise TypeError(u"You can only register a Wrapper not a %s" % wrapper)
 
         if name in self._wrappers and not override:
-            raise AttributeError(u"{name} is already a valid wrapper type, try a new name".format(name=name))
+            raise AttributeError(u"%s is already a valid wrapper type, try a new name" % name)
 
         self._wrappers[name] = wrapper
 
@@ -39,6 +43,7 @@ class WrappersSingleton(object):
 wrappers = WrappersSingleton()
 
 class Wrapper(object):
+    """The baseclass wrapper you can use as a basis for your own wrapper"""
 
     def __init__(self, errors, result):
         if isinstance(errors, basestring):
@@ -51,7 +56,7 @@ class Wrapper(object):
         self.result = result
 
     def build(self):
-        raise NotImplemented
+        raise NotImplementedError
 
 class DefaultWrapper(Wrapper):
 
@@ -63,7 +68,7 @@ class DefaultWrapper(Wrapper):
             result['success'] = True
         if self.errors:
             result['errors'] = self.errors
-        if self.result:
+        if self.result is not None:
             result['result'] = self.result
         return result
 
@@ -82,7 +87,7 @@ class ExtJSFormWrapper(Wrapper):
 
             result['errormsg'] = errmsg
             result['errors'] = errors
-        if self.result:
+        if self.result is not None:
             result['data'] = self.result
         return result
 

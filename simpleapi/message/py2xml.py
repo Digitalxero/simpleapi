@@ -2,144 +2,154 @@
 
 from xml.etree import cElementTree as ET
 import base64
+from dateutil.parser import parse
 
-__all__ = ('PythonToXML', 'type_methods')
+__all__ = ('PythonToXML',)
 
 class PythonToXML(object):
-    @classmethod
-    def dumps(cls, obj):
-        el = type_methods[type(obj)](obj)
-        return ET.tostring(el)
+    def handle(self, value, op='build'):
+        if op == 'build':
+            return getattr(self, 'build_%s' % type(value).__name__)(value)
+        elif op == 'parse':
+            type_name = value.get('type')
+            return getattr(self, 'parse_%s' % type_name)(value)
 
-    @classmethod
-    def loads(cls, stream):
-        if not ET.iselement(stream):
-            stream = ET.fromstring(stream)
-        method, arg = type_methods[stream.tag]
-        return method(stream, arg)
+    def create_item(self, type_name):
+        element = ET.Element('item')
+        element.set('type', type_name)
+        return element
 
-    @classmethod
-    def _dump_dict(cls, obj):
-        el = ET.Element('dict')
-        for key, value in obj.iteritems():
-            e = ET.Element(key)
-            e.text = cls.dumps(value)
-            el.append(e)
+    # Builder methods
 
-        return el
+    def build_NoneType(self, value):
+        element = self.create_item('NoneType')
+        return element
 
-    @classmethod
-    def _dump_sequence(cls, obj):
-        type_ = 'list'
-        if isinstance(obj, tuple):
-            type_ = 'tuple'
-        elif isinstance(obj, set):
-            type_ = 'set'
-        elif isinstance(obj, frozenset):
-            type_ = 'frozenset'
+    def build_time(self, value):
+        element = self.create_item('time')
+        element.text = value.isoformat()
+        return element
 
-        el = ET.Element(type_)
-        for item in obj:
-            e = ET.Element('item')
-            e.text = cls.dumps(item)
-            el.append(e)
+    def build_date(self, value):
+        element = self.create_item('date')
+        element.text = value.isoformat()
+        return element
 
-        return el
+    def build_datetime(self, value):
+        element = self.create_item('datetime')
+        element.text = value.ctime()
+        return element
 
-    @classmethod
-    def _dump_string(cls, obj):
-        el = ET.Element('string')
-        el.text = obj
-        return el
+    def build_str(self, value):
+        element = self.create_item('str')
+        element.text = str(value)
+        return element
 
-    @classmethod
-    def _dump_int(cls, obj):
-        el = ET.Element('int')
-        el.text = str(obj)
-        return el
+    def build_unicode(self, value):
+        element = self.create_item('unicode')
+        element.text = value #.encode("utf-8")
+        return element
 
-    @classmethod
-    def _dump_float(cls, obj):
-        el = ET.Element('float')
-        el.text = str(obj)
-        return el
+    def build_int(self, value):
+        element = self.create_item('int')
+        element.text = str(int(value))
+        return element
 
-    @classmethod
-    def _dump_hex(cls, obj):
-        el = ET.Element('hex')
-        el.text = str(obj)
-        return el
+    def build_float(self, value):
+        element = self.create_item('float')
+        element.text = str(float(value))
+        return element
 
-    @classmethod
-    def _dump_bytes(cls, obj):
-        el = ET.Element('bytes')
-        el.text = base64.b64encode(obj)
-        return el
+    def build_bool(self, value):
+        element = self.create_item('bool')
+        element.text = str(int(value))
+        return element
 
-    @classmethod
-    def _load_dict(cls, el, type_=None):
+    def build_list(self, value):
+        root = self.create_item('list')
+        for item in value:
+            root.append(self.handle(item))
+        return root
+
+    def build_tuple(self, value):
+        root = self.create_item('tuple')
+        for item in value:
+            root.append(self.handle(item))
+        return root
+
+    def build_dict(self, value):
+        root = self.create_item('dict')
+        for key, value in value.iteritems():
+            element = self.handle(value)
+            element.set('name', key)
+            root.append(element)
+        return root
+
+    def build_set(self, value):
+        root = self.create_item('set')
+        for item in list(value):
+            root.append(self.handle(item))
+        return root
+
+    # Parser methods
+
+    def parse_datetime(self, element):
+        return parse(element.text)
+
+    def parse_date(self, element):
+        return parse(element.text).date()
+
+    def parse_time(self, element):
+        return parse(element.text).time()
+
+    def parse_dict(self, element):
         tmp = {}
-        for item in el.getchildren():
-            tmp[item.tag] = cls.loads(item.text)
-
+        for item in element.getchildren():
+            tmp[item.get('name')] = self.handle(item, 'parse')
         return tmp
 
-    @classmethod
-    def _load_sequence(cls, el, type_='list'):
-        tmp = list()
-        for item in el.find('item'):
-            tmp.append(cls.loads(item))
-
-        if type_ == 'tuple':
-            return tuple(tmp)
-        elif type_ == 'set':
-            return set(tmp)
-        elif type_ == 'frozenset':
-            return frozenset(tmp)
-
+    def parse_list(self, element):
+        tmp = []
+        for item in element.getchildren():
+            tmp.append(self.handle(item, 'parse'))
         return tmp
 
-    @classmethod
-    def _load_string(cls, el, type_=None):
-        return el.text
+    def parse_set(self, element):
+        tmp = []
+        for item in element.getchildren():
+            tmp.append(self.handle(item, 'parse'))
+        return set(tmp)
 
-    @classmethod
-    def _load_int(cls, el, type_=None):
-        return int(el.text)
+    def parse_tuple(self, element):
+        tmp = []
+        for item in element.getchildren():
+            tmp.append(self.handle(item, 'parse'))
+        return tuple(tmp)
 
-    @classmethod
-    def _load_float(cls, el, type_=None):
-        return float(el.text)
+    def parse_unicode(self, element):
+        return element.text
 
-    @classmethod
-    def _load_hex(cls, el, type_=None):
-        return hex(el.text)
+    def parse_str(self, element):
+        return element.text
 
-    @classmethod
-    def _load_bytes(cls, el, type_=None):
-        return base64.b64decode(el.text)
+    def parse_int(self, element):
+        return int(element.text)
 
-type_methods = {
-    dict: PythonToXML._dump_dict,
-    list: PythonToXML._dump_sequence,
-    tuple: PythonToXML._dump_sequence,
-    set: PythonToXML._dump_sequence,
-    frozenset: PythonToXML._dump_sequence,
-    str: PythonToXML._dump_string,
-    unicode: PythonToXML._dump_string,
-    int: PythonToXML._dump_int,
-    float: PythonToXML._dump_float,
-    hex: PythonToXML._dump_hex,
-    bytes: PythonToXML._dump_bytes,
-    'dict': [PythonToXML._load_dict, None],
-    'list': [PythonToXML._load_sequence, 'list'],
-    'tuple': [PythonToXML._load_sequence, 'tuple'],
-    'set': [PythonToXML._load_sequence, 'set'],
-    'frozenset': [PythonToXML._load_sequence, 'frozenset'],
-    'string': [PythonToXML._load_string, None],
-    'int': [PythonToXML._load_int, None],
-    'float': [PythonToXML._load_float, None],
-    'hex': [PythonToXML._load_hex, None],
-    'bytes': [PythonToXML._load_bytes, None],
-}
+    def parse_float(self, element):
+        return float(element.text)
 
+    def parse_bool(self, element):
+        return bool(int(element.text))
+    
+    def parse_NoneType(self, element):
+        return None
+
+    # generic methods
+
+    def build(self, value):
+        root = self.handle(value)
+        return ET.tostring(root)
+
+    def parse(self, value):
+        root = ET.fromstring(value)
+        return self.handle(root, op='parse')

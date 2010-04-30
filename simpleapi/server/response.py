@@ -1,8 +1,17 @@
 # -*- coding: utf-8 -*-
 
-from django.http import HttpResponse
+import types
+
+try:
+    from django.http import HttpResponse
+except ImportError, e:
+    # FIXME: dirty hack? how can we prevent that the
+    # Client library raises an error if django settings isn't present
+    if not 'DJANGO_SETTINGS_MODULE' in str(e):
+        raise
 
 from simpleapi.message import formatters, wrappers
+from preformat import Preformatter
 
 __all__ = ('Response', 'ResponseException')
 
@@ -18,7 +27,7 @@ class Response(object):
         self.http_request = http_request
         self.namespace = namespace
         self.errors = errors
-        self.result = result
+        self.result = self._preformat(result)
         self.mimetype = mimetype
         self.callback = None
 
@@ -36,6 +45,10 @@ class Response(object):
                 self.errors.append(errmsg)
             elif isinstance(self.errors, basestring):
                 self.errors = [self.errors, errmsg]
+
+    def _preformat(self, value):
+        preformatter = Preformatter()
+        return preformatter.run(value)
 
     def build(self, skip_features=False):
         # call feature: handle_response

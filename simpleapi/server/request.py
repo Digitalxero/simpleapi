@@ -5,13 +5,15 @@ from session import Session
 from feature import FeatureContentResponse
 from simpleapi.message import formatters
 
+from django.core.exceptions import ObjectDoesNotExist
+
 __all__ = ('Request', 'RequestException')
 
 class RequestException(Exception): pass
 class Request(object):
 
     def __init__(self, http_request, namespace, input_formatter,
-                 output_formatter, wrapper, callback, mimetype):
+                 output_formatter, wrapper, callback, mimetype, restful):
         self.http_request = http_request
         self.namespace = namespace
         self.input_formatter = input_formatter
@@ -19,13 +21,17 @@ class Request(object):
         self.wrapper = wrapper
         self.callback = callback
         self.mimetype = mimetype
-
+        self.restful = restful
         self.session = Session()
 
     def run(self, request_items):
         # set all required simpleapi arguments
         access_key = request_items.pop('_access_key', None)
         method = request_items.pop('_call', None)
+        
+        if self.restful:
+            method = self.http_request.method.lower()
+        
         data = request_items.pop('_data', None)
 
         # update session
@@ -40,6 +46,10 @@ class Request(object):
             'nmap': self.namespace,
             'instance': local_namespace
         }
+        
+        # check the method
+        if not method:
+            raise RequestException(u'Method must be provided.')
 
         # check whether method exists
         if not self.namespace['functions'].has_key(method):
@@ -65,9 +75,16 @@ class Request(object):
         if data:
             if isinstance(self.input_formatter, formatters['value']):
                 raise RequestException(u'If you\'re using _data please make ' \
-                                        'sure you set _input and _input s not ' \
+                                        'sure you set _input and _input is not ' \
                                         '\'value\'.')
-            request_items = self.input_formatter.parse(data)
+            try:
+                request_items = self.input_formatter.kwargs(data, 'parse')
+            except ValueError, e:
+                raise RequestException(u'Data couldn\'t be decoded. ' \
+                                        'Please check _input and your _data')
+            else:
+                if not isinstance(request_items, dict):
+                    raise RequestException(u'_data must be an array/dictionary')
 
         # check whether all obligatory arguments are given
         ungiven_obligatory_args = list(set(function['args']['obligatory']) - \
@@ -87,8 +104,22 @@ class Request(object):
 
         # decode incoming variables (only if _data is not set!)
         if not data:
+            new_request_items = {}
             for key, value in request_items.iteritems():
-                request_items[key] = self.input_formatter.kwargs(value, 'parse')
+                try:
+                    new_request_items[str(key)] = self.input_formatter.kwargs(value, 'parse')
+                except ValueError, e:
+                    raise
+                    raise RequestException(u'Value for %s couldn\'t be decoded.' % \
+                        key)
+            request_items = new_request_items
+        else:
+            # make sure all keys are strings, not unicodes (for compatibility 
+            # issues: Python < 2.6.5)
+            new_request_items = {}
+            for key, value in request_items.iteritems():
+                new_request_items[str(key)] = value
+            request_items = new_request_items
 
         # check constraints
         for key, value in request_items.iteritems():
@@ -109,7 +140,13 @@ class Request(object):
             result = e
         else:
             # make the call
-            result = getattr(local_namespace, method)(**request_items)
+            try:
+                result = getattr(local_namespace, method)(**request_items)
+            except Exception, e:
+                if isinstance(e, ObjectDoesNotExist):
+                    raise RequestException(e)
+                else:
+                    raise
 
         # if result is not a Response, create one
         if not isinstance(result, Response):
