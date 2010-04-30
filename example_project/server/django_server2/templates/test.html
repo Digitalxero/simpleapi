@@ -1,0 +1,16 @@
+<html>
+    <head></head>
+    <body>
+        <script type="text/javascript"
+            src="{{MEDIA_URL}}jquery.min.js"></script>
+        <script type="text/javascript"
+            src="json.js"></script>
+        <script type="text/javascript"
+            src="simpleapi.js"></script>
+        <script type="text/javascript">
+            var test = Client('http://127.0.0.1:8000/api/example/',
+                              {wrapper_type: "message"});
+            var messages = test.call('test', {username: "Digitalxero"});
+        </script>
+    </body>
+</html>

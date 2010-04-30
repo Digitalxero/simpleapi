@@ -12,9 +12,9 @@ class Response(object):
     def __init__(self, http_request, namespace=None, output_formatter=None,
                  wrapper=None, errors=None, result=None, mimetype=None,
                  callback=None, session=None):
-        
+
         assert isinstance(errors, (basestring, list)) or errors is None
-        
+
         self.http_request = http_request
         self.namespace = namespace
         self.errors = errors

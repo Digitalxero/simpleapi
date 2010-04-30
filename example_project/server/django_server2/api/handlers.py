@@ -21,4 +21,3 @@ class Example(Namespace):
 
         return Message(root)
     test.published = True
-    test.methods = ('POST',)
