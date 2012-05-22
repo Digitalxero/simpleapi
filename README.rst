@@ -2,27 +2,33 @@
 simpleapi
 =========
 
-:version: 0.0.6-pre (alpha-stage)
+:dev-version: 0.1
+:latest stable: 0.0.9
 :author: Florian Schlachter (http://www.fs-tools.de)
 :license: MIT-license / see LICENSE file for more
-:website: http://simpleapi.de
+:website: http://simpleapi.florian-schlachter.de
 :mailinglist: subscribe: simpleapi@librelist.com
 
-An almost complete documentation is still work in progress and will be published at http://www.simpleapi.de soon.
+An almost complete documentation is still work in progress and will be published at http://simpleapi.florian-schlachter.de soon.
 
 About
 =====
 
-simpleapi is an **easy to use, consistent, transparent and portable** way of providing an API within your django project. It supports **several output formats** (e. g. json, jsonp, xml) and provides a **client library** to access the API seamlessly from any python application. You can also use nearly every **Ajax framework** (e. g. jQuery, ExtJS, etc.) to access the API.
+simpleapi is an **easy to use, consistent, transparent and portable** way of
+providing an API. It supports **several transport formats** (e. g. json, jsonp,
+xml, yaml) and provides **server** (standalone and also django, Flask, Google AppEngine and any WSGI-compatible implementation like gunicorn) and **client libraries** (PHP, Python) to interact seamlessly. You can also use nearly every **Ajax framework** (e. g. jQuery, ExtJS, etc.) to access the API.
 
+* server support for **django**, **Flask** and **Google AppEngine**
+* client support for **python**, **php** and **javascript**
 * dynamic key authentication / ip restriction
 * type-conversion / constraints
 * object serialization of django model instances, django queryset instances, 
   mongoengine documents, mongoengine queryset instances
 * inheritance / multiple versions of one API
-* several encoding/decoding formats (json, jsonp, xml, etc.)
+* several encoding/decoding formats (json, jsonp, xml, yaml, etc.)
 * several result formats (ie. for ExtJS forms, etc.)
 * features: caching, throttling
+* debugging and profiling capabilities
 * examples
 
 Installation
@@ -30,7 +36,7 @@ Installation
 
 ::
     
-    pip install --upgrade django-simpleapi
+    pip install --upgrade simpleapi
 
 From GitHub
 -----------
@@ -42,18 +48,14 @@ From GitHub
 Dependencies
 ============
 
+* **server**: django >= 1.1.1, Flask >= 0.1 or Google AppEngine
 * Python 2.5 or greater
 * simplejson (if you're using Python <= 2.5)
 * python-dateutil
+* pyyaml (optional, for YAML-support)
+* sphinx (optional, for the docs)
 
 (see requirements.txt as well)
-
-Screencasts
-===========
-
-You should watch the screencasts in full screen.
-
-:Contact-app: http://vimeo.com/11280195 (good quality: http://bit.ly/cUdogY)
 
 Examples
 ========
@@ -93,14 +95,61 @@ Server (handler.py)::
         last.published = True
         last.constraints = {'numbers': int}
 
-Server (urls.py)::
+**Standalone-Server** (app.py)::
+
+    from simpleapi import Route
+    from handlers import SMSAPI
+
+    route = Route(SMSAPI, framework='standalone', path=r'^/api/')
+    route.serve() # serves on port 5050 by default
+
+Gunicorn (**WSGI-compatible implementation**) (app.py)::
+
+    from simpleapi import Route
+    from handlers import SMSAPI
+
+    route = Route(SMSAPI, framework='wsgi', path=r'^/api/')
+    
+    # start Gunicorn (with 5 workers):
+    # gunicorn -w 5 app:route
+
+**Django-Server** (urls.py)::
 
     from handlers import SMSAPI
     urlpatterns = patterns('',
         (r'^api/$', Route(SMSAPI))
     )
 
-Client (python)::
+**Flask-Server** (app.py)::
+
+    from flask import Flask
+    from simpleapi import Route
+    from handlers import SMSAPI
+
+    app = Flask(__name__)
+    app.route('/api/')(Route(SMSAPI, framework='flask'))
+
+    if __name__ == '__main__':
+        app.run()
+
+**Google AppEngine** (main.py)::
+
+    from google.appengine.ext import webapp
+    from google.appengine.ext.webapp import util
+
+    from simpleapi import Route
+    from handlers import SMSAPI
+
+    def main():
+        application = webapp.WSGIApplication(
+            [('/api/', Route(SMSAPI, framework='appengine'))]
+        )
+        util.run_wsgi_app(application)
+
+    if __name__ == '__main__':
+        main()
+
+Client (python/**remote**)::
 
     from simpleapi import Client
     
@@ -114,6 +163,33 @@ Client (python)::
                      sender='simpleapi')
     print "Sent successful?", sms['sent']
     print "Which sender?", sms['obj']['sender']
+
+Client (python/**local**)::
+
+    from simpleapi import DummyClient, Route
+    from handlers import SMSAPI
+    
+    client = DummyClient(Route(SMSAPI, framework='dummy'),
+                         access_key='mysecret')
+    
+    sms = client.sms(to='555123', msg='Hey yo! This is simpleapi calling.')
+    print "Sent successful?", sms['sent']
+    
+    sms = client.sms(to='555123', msg='2nd test with own sender',
+                     sender='simpleapi')
+    print "Sent successful?", sms['sent']
+    print "Which sender?", sms['obj']['sender']
+
+Client (PHP)::
+
+    require_once("class.client.php");
+    
+    $client = new Client($ns="http://localhost:8888/api/",
+                         $access_key='mysecret');
+    print("Sent? ".$client->sms(array(
+        'to' => '555123',
+        'msg' => 'Hey yo! This is the PHP client sending you a SMS.'
+    ))->{'sent'});
 
 Client (jQuery)::
 
@@ -137,7 +213,7 @@ Server (handler.py)::
     
     class CalculatorAPI(Namespace):
         __ip_restriction__ = ['127.0.0.*',]
-        __authentication = "lets_calc"
+        __authentication__ = "lets_calc"
         
         def power(self, a, b):
             return a ** b
@@ -149,14 +225,61 @@ Server (handler.py)::
         sum.published = True
         sum.constraints = lambda namespace, key, value: float(value)
 
-Server (urls.py)::
+**Standalone-Server** (app.py)::
+
+    from simpleapi import Route
+    from handlers import CalculatorAPI
+
+    route = Route(CalculatorAPI, framework='standalone', path=r'^/api/')
+    route.serve() # serves on port 5050 by default
+
+Gunicorn (**WSGI-compatible implementation**) (app.py)::
+
+    from simpleapi import Route
+    from handlers import CalculatorAPI
+
+    route = Route(CalculatorAPI, framework='wsgi', path=r'^/api/')
+    
+    # start Gunicorn (with 5 workers):
+    # gunicorn -w 5 app:route
+
+**Django-Server** (urls.py)::
 
     from handlers import CalculatorAPI
     urlpatterns = patterns('',
         (r'^api/$', Route(CalculatorAPI))
     )
 
-Client (python)::
+**Flask-Server** (app.py)::
+
+    from flask import Flask
+    from simpleapi import Route
+    from handlers import CalculatorAPI
+
+    app = Flask(__name__)
+    app.route('/api/')(Route(CalculatorAPI, framework='flask'))
+
+    if __name__ == '__main__':
+        app.run()
+
+**Google AppEngine** (main.py)::
+
+    from google.appengine.ext import webapp
+    from google.appengine.ext.webapp import util
+
+    from simpleapi import Route
+    from handlers import CalculatorAPI
+
+    def main():
+        application = webapp.WSGIApplication(
+            [('/api/', Route(CalculatorAPI, framework='appengine'))]
+        )
+        util.run_wsgi_app(application)
+
+    if __name__ == '__main__':
+        main()
+
+Client (python/**remote**)::
 
     from simpleapi import Client
     
@@ -164,6 +287,25 @@ Client (python)::
     
     print "5 ** 8 =", client.power(a=5, b=8)
     print "1+2+3+4+5+6+7 =", client.sum(a=1, b=2, c=3, d=4, e=5, f=6, g=7)
+
+Client (python/**local**)::
+
+    from simpleapi import DummyClient, Route
+    from handlers import CalculatorAPI
+    
+    client = DummyClient(Route(CalculatorAPI, framework='dummy'),
+                         access_key='lets_calc')
+    
+    print "5 ** 8 =", client.power(a=5, b=8)
+    print "1+2+3+4+5+6+7 =", client.sum(a=1, b=2, c=3, d=4, e=5, f=6, g=7)
+
+Client (PHP)::
+
+    require_once("class.client.php");
+    
+    $client = new Client($ns="http://localhost:8888/api/",
+                         $access_key='lets_calc');
+    print("5 ** 8 = ".$client->power(array('a'=>5, 'b'=>8)));
 
 Client (jQuery)::
 

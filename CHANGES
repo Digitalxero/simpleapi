@@ -1,15 +1,57 @@
 simpleapi changelog
 ===================
 
-Version 0.0.6
--------------
+Version 0.1
+-----------
 
 [current development version]
+
+
+
+Version 0.0.9
+-------------
+
+- various bugfixes
+- added RouteManager (RouteMgr-class) for managing multiple Routes via an
+  URL pattern, e.g. in django: (r'^api/(?P<name>.*)/$', RouteMgr(r1, r2, r3))
+- added UnformattedResponse
+- added Ext.Direct support
+- added batched-request-handling (execute multiple calls within the same HTTP
+  request)
+- added before_request/after_request support for Namespaces (works like Features
+  but for custom Namespaces for which the Feature-support is unnecessary)
+- added support for newer Flask versions
+
+Version 0.0.8
+-------------
+
+- various bugfixes
+- huge doc improvements (docs will be published on simpleapi.de)
+- added Google AppEngine support (+demo projects)
+- added DummyClient for local in-app access to the API (+demo project)
+- added debug-Mode for Route (python debugger, function profiling)
+- added simpleapi-wide profiling capabilities (see debug2 demo project)
+- added standalone server (route.serve())
+- added support for WSGI-compatible server (like gunicorn)
+- added handling of long-types in the XML-formatter
+
+Version 0.0.7
+-------------
+
+- various bugfixes
+- added flask support (http://flask.pocoo.org/) -- see exampleproject for more
+- added de/encoding of datetimes for JSON(P)
+
+Version 0.0.6
+-------------
 
 - various bugfixes
 - RESTful (add restful=True to your Route)
 - added in-url parameters (see example project 5)
-- huge doc improvements (docs will be published on simpleapi.de)
+- new `format´ method-option to format the output of a method like this:
+  my_method.format = lambda value: "%.2f" % round(value, 2)
+- added PHP client
+- added YAML support
 
 Version 0.0.5
 -------------

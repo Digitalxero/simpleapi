@@ -1,20 +1,41 @@
 # -*- coding: utf-8 -*-
 
+import warnings
+import tempfile
+import pprint
+try:
+    import cProfile
+    import pstats
+    has_debug = True
+except ImportError:
+    has_debug = False
+
 from response import Response
-from session import Session
 from feature import FeatureContentResponse
 from simpleapi.message import formatters
+from simpleapi.message.common import SAException
 
-from django.core.exceptions import ObjectDoesNotExist
+try:
+    from django.core.exceptions import ObjectDoesNotExist as django_notexist
+    has_django = True
+except:
+    has_django = False
+
+try:
+    from mongoengine.queryset import DoesNotExist as mongoengine_notexist
+    has_mongoengine = True
+except ImportError:
+    has_mongoengine = False
 
 __all__ = ('Request', 'RequestException')
 
-class RequestException(Exception): pass
+class RequestException(SAException): pass
 class Request(object):
 
-    def __init__(self, http_request, namespace, input_formatter,
-                 output_formatter, wrapper, callback, mimetype, restful):
-        self.http_request = http_request
+    def __init__(self, sapi_request, namespace, input_formatter,
+                 output_formatter, wrapper, callback, mimetype, restful,
+                 debug, route, ignore_unused_args):
+        self.sapi_request = sapi_request
         self.namespace = namespace
         self.input_formatter = input_formatter
         self.output_formatter = output_formatter
@@ -22,31 +43,38 @@ class Request(object):
         self.callback = callback
         self.mimetype = mimetype
         self.restful = restful
-        self.session = Session()
+        self.debug = debug
+        self.route = route
+        self.ignore_unused_args = ignore_unused_args
+        self.session = sapi_request.session
 
-    def run(self, request_items):
+    def process_request(self, request_items):
         # set all required simpleapi arguments
         access_key = request_items.pop('_access_key', None)
         method = request_items.pop('_call', None)
-        
+
         if self.restful:
-            method = self.http_request.method.lower()
-        
+            method = self.sapi_request.method.lower()
+
         data = request_items.pop('_data', None)
 
         # update session
-        self.session.request = self.http_request
+        self.session.request = self.sapi_request
         self.session.mimetype = self.mimetype
         self.session.callback = self.callback
         self.session.access_key = access_key
 
+        # make all uploaded files available
+        if self.route.is_django():
+            self.session.files = self.sapi_request.FILES
+
         # instantiate namespace
         local_namespace = self.namespace['class'](self)
-        self.session.namespace = {
+        self.session._internal.namespace = {
             'nmap': self.namespace,
             'instance': local_namespace
         }
-        
+
         # check the method
         if not method:
             raise RequestException(u'Method must be provided.')
@@ -61,15 +89,15 @@ class Request(object):
 
         # check ip address
         if not self.namespace['ip_restriction'](local_namespace, \
-                                                self.http_request.META.get('REMOTE_ADDR')):
+                                                self.sapi_request.remote_addr):
             raise RequestException(u'You are not allowed to access.')
 
         function = self.namespace['functions'][method]
         self.session.function = function
 
         # check allowed HTTP methods
-        if not function['methods']['function'](self.http_request.method):
-            raise RequestException(u'Method not allowed: %s' % self.http_request.method)
+        if not function['methods']['function'](self.sapi_request.method, function['methods']['allowed_methods']):
+            raise RequestException(u'Method not allowed: %s' % self.sapi_request.method)
 
         # if data is set, make sure input formatter is not ValueFormatter
         if data:
@@ -95,12 +123,16 @@ class Request(object):
 
         # check whether there are more arguments than needed
         if not function['args']['kwargs_allowed']:
-            unsued_arguments = list(set(request_items.keys()) - \
+            unused_arguments = list(set(request_items.keys()) - \
                 set(function['args']['all']))
 
-            if unsued_arguments:
-                raise RequestException(u'Unused arguments: %s' % \
-                ", ".join(unsued_arguments))
+            if unused_arguments:
+                if not self.ignore_unused_args:
+                    raise RequestException(u'Unused arguments: %s' % \
+                    ", ".join(unused_arguments))
+                else:
+                    for key in unused_arguments:
+                        del request_items[key]
 
         # decode incoming variables (only if _data is not set!)
         if not data:
@@ -126,7 +158,7 @@ class Request(object):
             try:
                 request_items[key] = function['constraints']['function'](
                     local_namespace, key, value)
-            except:
+            except (ValueError,):
                 raise RequestException(u'Constraint failed for argument: %s' % key)
 
         # we're done working on arguments, pass it to the session
@@ -139,11 +171,35 @@ class Request(object):
         except FeatureContentResponse, e:
             result = e
         else:
+            # call before_request
+            if hasattr(local_namespace, 'before_request'):
+                getattr(local_namespace, 'before_request')(self, self.session)
+            
             # make the call
             try:
-                result = getattr(local_namespace, method)(**request_items)
+                if self.debug:
+                    _, fname = tempfile.mkstemp()
+                    self.route.logger.debug(u"Profiling call '%s': %s" % \
+                        (method, fname))
+
+                    self.route.logger.debug(u"Calling parameters: %s" % \
+                        pprint.pformat(request_items))
+
+                    profile = cProfile.Profile()
+                    result = profile.runcall(getattr(local_namespace, method),
+                        **request_items)
+                    profile.dump_stats(fname)
+                    
+                    self.route.logger.debug(u"Loading stats...")
+                    stats = pstats.Stats(fname)
+                    stats.strip_dirs().sort_stats('time', 'calls') \
+                        .print_stats(25)
+                else:
+                    result = getattr(local_namespace, method)(**request_items)
             except Exception, e:
-                if isinstance(e, ObjectDoesNotExist):
+                if has_django and isinstance(e, django_notexist):
+                    raise RequestException(e)
+                elif has_mongoengine and isinstance(e, mongoengine_notexist):
                     raise RequestException(e)
                 else:
                     raise
@@ -151,13 +207,13 @@ class Request(object):
         # if result is not a Response, create one
         if not isinstance(result, Response):
             response = Response(
-                http_request=self.http_request,
+                sapi_request=self.sapi_request,
                 namespace=self.namespace,
                 result=result,
                 output_formatter=self.output_formatter,
                 wrapper=self.wrapper,
                 mimetype=self.mimetype,
-                session=self.session,
+                function=function
             )
         else:
             response = result

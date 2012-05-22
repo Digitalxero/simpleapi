@@ -5,18 +5,17 @@ import hashlib
 import warnings
 
 from simpleapi.message import formatters, Formatter
+from simpleapi.message.common import SAException
 
 try:
     from django.core.cache import cache
-except ImportError, e:
-    # FIXME: dirty hack? how can we prevent that the
-    # Client library raises an error if django settings isn't present
-    if not 'DJANGO_SETTINGS_MODULE' in str(e):
-        raise
+    has_django = True
+except:
+    has_django = False
 
 __all__ = ('__features__', 'Feature', 'FeatureException', 'FeatureContentResponse')
 
-class FeatureException(Exception): pass
+class FeatureException(SAException): pass
 class FeatureContentResponse(FeatureException): pass
 class Feature(object):
 
@@ -104,6 +103,9 @@ class CachingFeature(Feature):
 
     __config__ = ('caching', (dict, bool))
 
+    def setup(self):
+        assert has_django, 'Works currently with django only'
+
     def handle_request(self, request):
         caching_config = self.get_config(request)
 
@@ -147,6 +149,9 @@ class ThrottlingFeature(Feature):
 
     __config__ = ('throttling', dict)
 
+    def setup(self):
+        assert has_django, 'Works currently with django only'
+
     def handle_request(self, request):
         throttling_config = self.get_config(request)
         scope = self.get_config_scope(request)
@@ -159,7 +164,7 @@ class ThrottlingFeature(Feature):
         assert rpm >= 0
         assert rph >= 0
 
-        remote_addr = request.session.request.META.get('REMOTE_ADDR')
+        remote_addr = request.session.request.remote_addr
         key = 'simpleapi_throttling_%s:%s' % (scope, remote_addr)
         rps_key = '%s_rps' % key
         rpm_key = '%s_rpm' % key
@@ -172,7 +177,7 @@ class ThrottlingFeature(Feature):
                 self.error(u'Throttling active (exceeded %s #/sec.)' % no)
             else:
                 try:
-                    cache.incr(rps_key)
+                    cache.incr(rps_key) # FIXME: using incr() eliminates the timeout!
                 except ValueError:
                     cache.set(rps_key, 1, 1)
 

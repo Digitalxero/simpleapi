@@ -1,11 +1,58 @@
 # -*- coding: utf-8 -*-
 
+import types
 import copy
 import inspect
+import pprint
 import re
+import sys
+import os
+import pdb
+import warnings
+import logging
 
+try:
+    import cProfile
+    import pstats
+    has_debug = True
+except ImportError:
+    has_debug = False
+
+import urlparse
+import cgi
+from wsgiref.simple_server import make_server
+from wsgiref.handlers import SimpleHandler
+
+SIMPLEAPI_DEBUG = bool(int(os.environ.get('SIMPLEAPI_DEBUG', 0)))
+SIMPLEAPI_DEBUG_FILENAME = os.environ.get('SIMPLEAPI_DEBUG_FILENAME',
+    'simpleapi.profile')
+SIMPLEAPI_DEBUG_LEVEL = os.environ.get('SIMPLEAPI_DEBUG_LEVEL', 'all')
+assert SIMPLEAPI_DEBUG_LEVEL in ['all', 'call'], \
+    u'SIMPLEAPI_DEBUG_LEVEL must be one of these: all, call'
+
+if SIMPLEAPI_DEBUG and not has_debug:
+    SIMPLEAPI_DEBUG = False
+    warnings.warn("Debugging disabled since packages pstats/cProfile not found (maybe you have to install it).")
+
+TRIGGERED_METHODS = ['get', 'post', 'put', 'delete']
+FRAMEWORKS = ['flask', 'django', 'appengine', 'dummy', 'standalone', 'wsgi']
+MAX_CONTENT_LENGTH = 1024 * 1024 * 16 # 16 megabytes
+
+restricted_functions = [
+    'before_request',
+    'after_request'
+]
+
+try:
+    from google.appengine.ext.webapp import RequestHandler as AE_RequestHandler
+    has_appengine = True
+except ImportError:
+    has_appengine = False
+
+from simpleapi.message.common import SAException
+from sapirequest import SAPIRequest
 from request import Request, RequestException
-from response import Response, ResponseException
+from response import Response, ResponseMerger, ResponseException
 from namespace import NamespaceException
 from feature import __features__, Feature, FeatureException
 from simpleapi.message import formatters, wrappers
@@ -13,17 +60,198 @@ from utils import glob_list
 
 __all__ = ('Route', )
 
-class RouteException(Exception): pass
 class Route(object):
+
+    def __new__(cls, *args, **kwargs):
+        if kwargs.get('framework') == 'appengine':
+            assert has_appengine
+            class AppEngineRouter(AE_RequestHandler):
+                def __getattribute__(self, name):
+                    if name in TRIGGERED_METHODS:
+                        self.request.method = name
+                        return self
+                    else:
+                        return AE_RequestHandler.__getattribute__(self, name)
+                                
+                def __call__(self):
+                    result = self.router(self.request)
+                    self.response.out.write(result['result'])
+            
+            AppEngineRouter.router = Router(*args, **kwargs)
+            return AppEngineRouter
+        elif kwargs.get('framework') == 'flask':
+            obj = Router(*args, **kwargs)
+            obj.__name__ = 'Route'
+            return obj
+        elif kwargs.get('framework') == 'wsgi':
+            router = Router(*args, **kwargs)
+            class WSGIHandler(object):
+                def __call__(self, *args, **kwargs):
+                    return self.router.handle_request(*args, **kwargs)
+            handler = WSGIHandler()
+            handler.router = router
+            return handler
+        else:
+            return Router(*args, **kwargs)
+
+class StandaloneRequest(object): pass
+class RouterException(SAException): pass
+class Router(object):
 
     def __init__(self, *namespaces, **kwargs):
         """Takes at least one namespace. 
         """
+        self.name = kwargs.pop('name', str(id(self)))
+        self.logger = logging.getLogger("simpleapi.%s" % self.name)
         self.nmap = {}
-        self.restful = kwargs.get('restful', False)
+        self.debug = kwargs.pop('debug', False)
+        self.ignore_unused_args = kwargs.pop('ignore_unused_args', False)
+
+        if self.debug and not has_debug:
+            self.debug = False
+            warnings.warn("Debugging disabled since packages pstats/cProfile not found (maybe you have to install it).")
+
+        self.restful = kwargs.pop('restful', False)
+        self.framework = kwargs.pop('framework', 'django')
+        self.path = re.compile(kwargs.pop('path', r'^/'))
+
+        assert len(kwargs) == 0, u'Unknown Route configuration(s) (%s)' % \
+            ", ".join(kwargs.keys())
+
+        # make shortcut 
+        self._caller = self.__call__
+
+        assert self.framework in FRAMEWORKS
+        assert (self.debug ^ SIMPLEAPI_DEBUG) or \
+            not (self.debug and SIMPLEAPI_DEBUG), \
+            u'You can either activate Route-debug or simpleapi-debug, not both.'
+
+        if self.debug or SIMPLEAPI_DEBUG:
+            self.logger.setLevel(logging.DEBUG)
+            handler = logging.StreamHandler()
+            formatter = logging.Formatter(
+                "%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        else:
+            self.logger.setLevel(logging.WARNING)
+        
+        if SIMPLEAPI_DEBUG and SIMPLEAPI_DEBUG_LEVEL == 'all':
+            self.profile_start()
 
         for namespace in namespaces:
             self.add_namespace(namespace)
+
+    def handle_request(self, environ, start_response):
+        if not self.path.match(environ.get('PATH_INFO')): 
+            status = '404 Not found'
+            start_response(status, [])
+            return ["Entry point not found"]
+        else:
+            content_type = environ.get('CONTENT_TYPE')
+            try:
+                content_length = int(environ['CONTENT_LENGTH'])
+            except (KeyError, ValueError):
+                content_length = 0
+
+            # make sure we ignore too large requests for security and stability
+            # reasons
+            if content_length > MAX_CONTENT_LENGTH:
+                status = '413 Request entity too large'
+                start_response(status, [])
+                return ["Request entity too large"]
+
+            request_method = environ.get('REQUEST_METHOD', '').lower()
+
+            # make sure we only support methods we care
+            if not request_method in TRIGGERED_METHODS:
+                status = '501 Not Implemented'
+                start_response(status, [])
+                return ["Not Implemented"]
+
+            query_get = urlparse.parse_qs(environ.get('QUERY_STRING'))
+            for key, value in query_get.iteritems():
+                query_get[key] = value[0] # respect the first value only
+
+            query_post = {}
+            if content_type in ['application/x-www-form-urlencoded', 
+                'application/x-url-encoded']:
+                post_env = environ.copy()
+                post_env['QUERY_STRING'] = ''
+                fs = cgi.FieldStorage(
+                    fp=environ['wsgi.input'],
+                    environ=post_env,
+                    keep_blank_values=True
+                )
+                query_post = {}
+                for key in fs:
+                    query_post[key] = fs.getvalue(key)
+            elif content_type == 'multipart/form-data':
+                # XXX TODO
+                raise NotImplementedError, u'Currently not supported.' 
+            
+            # GET + POST 
+            query_data = query_get
+            query_data.update(query_post)
+
+            # Make request
+            request = StandaloneRequest()
+            request.method = request_method
+            request.data = query_data
+            request.remote_addr = environ.get('REMOTE_ADDR', '')
+
+            # Make call
+            result = self._caller(request)
+
+            status = '200 OK'
+            headers = [('Content-type', result['mimetype'])]
+            start_response(status, headers)
+            return [result['result'],]
+
+    def serve(self, host='', port=5050):
+        httpd = make_server(host, port, self.handle_request)
+        self.logger.info(u"Started serving on port %d..." % port)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            self.logger.info(u"Server stopped.")
+
+    def profile_start(self):
+        assert has_debug
+        self.profile = cProfile.Profile()
+        self.profile.enable()
+    
+    def profile_stop(self):
+        assert has_debug
+        self.profile.disable()
+        self.profile.dump_stats(SIMPLEAPI_DEBUG_FILENAME)
+
+    def profile_stats(self):
+        assert has_debug
+        self.logger.debug(u"Loading stats...")
+        stats = pstats.Stats(SIMPLEAPI_DEBUG_FILENAME)
+        stats.strip_dirs().sort_stats('time', 'calls') \
+            .print_stats()
+
+    def __del__(self):
+        if SIMPLEAPI_DEBUG and SIMPLEAPI_DEBUG_LEVEL == 'all':
+            self.profile_stop()
+            self.profile_stats()
+
+    def is_standalone(self):
+        return self.framework in ['standalone', 'wsgi']
+
+    def is_dummy(self):
+        return self.framework == 'dummy'
+
+    def is_appengine(self):
+        return self.framework == 'appengine'
+
+    def is_flask(self):
+        return self.framework == 'flask'
+
+    def is_django(self):
+        return self.framework == 'django'
 
     def _redefine_default_namespace(self):
         # - recalculate default namespace version -
@@ -43,19 +271,31 @@ class Route(object):
 
     def add_namespace(self, namespace):
         version = getattr(namespace, '__version__', 1)
-        assert isinstance(version, int), u'version must be either an integer or not set'
+        assert isinstance(version, int), \
+            u'version must be either an integer or not set'
 
         # make sure no version is assigned twice
         assert not self.nmap.has_key(version), u'version is assigned twice'
 
+        allowed_functions = []
+
+        # check for introspection allowed
+        if getattr(namespace, '__introspection__', False):
+            allowed_functions.append('introspect')
+
         # determine public and published functions
-        functions = filter(lambda item: '__' not in item[0] and
-            getattr(item[1], 'published', False) == True,
+        functions = filter(lambda item: '__' not in item[0] and item[0] not in 
+            restricted_functions and ((getattr(item[1], 'published', False) ==
+            True) or item[0] in allowed_functions),
             inspect.getmembers(namespace))
 
         # determine arguments of each function
         functions = dict(functions)
         for function_name, function_method in functions.iteritems():
+            # check for reserved function names
+            assert function_name not in ['error', '__init__', 'get_name'],\
+                u'Name %s is reserved.' % function_name
+            
             # ArgSpec(args=['self', 'a', 'b'], varargs=None, keywords=None, defaults=None)
             raw_args = inspect.getargspec(function_method)
 
@@ -112,10 +352,13 @@ class Route(object):
             if hasattr(function_method, 'methods'):
                 allowed_methods = function_method.methods
                 assert isinstance(allowed_methods, (list, tuple))
-                method_function = lambda method: method in allowed_methods
+                method_function = lambda method, methods: method in methods
             else:
                 allowed_methods = None
-                method_function = lambda method: True
+                method_function = lambda method, methods: True
+
+            # determine format
+            format = getattr(function_method, 'format', lambda val: val)
 
             functions[function_name] = {
                 'method': function_method,
@@ -133,6 +376,7 @@ class Route(object):
                     'function': constraint_function,
                     'raw': constraints,
                 },
+                'format': format,
                 'methods': {
                     'function': method_function,
                     'allowed_methods': allowed_methods,
@@ -143,8 +387,11 @@ class Route(object):
         if hasattr(namespace, '__authentication__'):
             authentication = namespace.__authentication__
             if isinstance(authentication, basestring):
-                authentication = lambda namespace, access_key: \
-                    namespace.__authentication__ == access_key
+                if hasattr(namespace, authentication):
+                    authentication = getattr(namespace, authentication)
+                else:
+                    authentication = lambda namespace, access_key: \
+                        namespace.__authentication__ == access_key
         else:
             # grant allow everyone access
             authentication = lambda namespace, access_key: True
@@ -156,10 +403,12 @@ class Route(object):
 
             if isinstance(ip_restriction, list):
                 # make the ip address list wildcard searchable
-                namespace.__ip_restriction__ = glob_list(namespace.__ip_restriction__)
+                namespace.__ip_restriction__ = \
+                    glob_list(namespace.__ip_restriction__)
 
                 # restrict access to the given ip address list
-                ip_restriction = lambda namespace, ip: ip in namespace.__ip_restriction__
+                ip_restriction = lambda namespace, ip: ip in \
+                    namespace.__ip_restriction__
         else:
             # accept every ip address
             ip_restriction = lambda namespace, ip: True
@@ -203,11 +452,13 @@ class Route(object):
         if hasattr(namespace, '__features__'):
             raw_features = namespace.__features__
             for feature in raw_features:
-                assert isinstance(feature, basestring) or issubclass(feature, Feature)
+                assert isinstance(feature, basestring) or \
+                    issubclass(feature, Feature)
+
                 if isinstance(feature, basestring):
                     assert feature in __features__.keys(), \
                         u'%s is not a built-in feature' % feature
-                    
+
                     features.append(__features__[feature](self.nmap[version]))
                 elif issubclass(feature, Feature):
                     features.append(feature(self.nmap[version]))
@@ -217,10 +468,15 @@ class Route(object):
 
         return version
 
-    def __call__(self, http_request, **urlparameters):
-        request_items = dict(http_request.REQUEST.items())
+    def __call__(self, http_request=None, **urlparameters):
+        sapi_request = SAPIRequest(self, http_request)
+        request_items = dict(sapi_request.REQUEST.items())
         request_items.update(urlparameters)
-        
+
+        if SIMPLEAPI_DEBUG and SIMPLEAPI_DEBUG_LEVEL == 'call':
+            self.logger.info(pprint.pformat(request_items))
+            self.profile_start()
+
         version = request_items.pop('_version', 'default')
         callback = request_items.pop('_callback', None)
         output_formatter = request_items.pop('_output', None)
@@ -257,7 +513,7 @@ class Route(object):
                                         'unknown: %s' % input_formatter)
 
             # get input formatter
-            input_formatter_instancec = namespace['input_formatters'][input_formatter](http_request, callback)
+            input_formatter_instancec = namespace['input_formatters'][input_formatter](sapi_request, callback)
 
             # check output formatter
             if output_formatter not in namespace['output_formatters']:
@@ -265,7 +521,7 @@ class Route(object):
                                         'unknown: %s' % output_formatter)
 
             # get output formatter
-            output_formatter_instance = namespace['output_formatters'][output_formatter](http_request, callback)
+            output_formatter_instance = namespace['output_formatters'][output_formatter](sapi_request, callback)
 
             # check wrapper
             if wrapper not in namespace['wrappers']:
@@ -277,53 +533,96 @@ class Route(object):
 
             # check whether version exists or not
             if not self.nmap.has_key(version):
-                raise RouteException(u'Version %s not found (possible: %s)' % \
+                raise RouterException(u'Version %s not found (possible: %s)' % \
                     (version, ", ".join(map(lambda i: str(i), self.nmap.keys()))))
 
             request = Request(
-                http_request=http_request,
+                sapi_request=sapi_request,
                 namespace=namespace,
                 input_formatter=input_formatter_instancec,
                 output_formatter=output_formatter_instance,
                 wrapper=wrapper_instance,
                 callback=callback,
                 mimetype=mimetype,
-                restful=self.restful
+                restful=self.restful,
+                debug=self.debug,
+                route=self,
+                ignore_unused_args=self.ignore_unused_args,
             )
-            response = request.run(request_items)
-            http_response = response.build()
+
+            # map request items to the correct names
+            wi = wrapper_instance(sapi_request=sapi_request)
+            request_items = wi._parse(request_items)
+            if not isinstance(request_items,
+                (list, tuple, types.GeneratorType)):
+                request_items = [request_items, ]
+
+            responses = []
+            for request_item in request_items:
+                # clear session (except _internal)
+                sapi_request.session.clear()
+
+                # process request
+                try:
+                    responses.append(request.process_request(request_item))
+                except (NamespaceException, RequestException, \
+                        ResponseException, RouterException, FeatureException),e:
+                    response = Response(
+                        sapi_request,
+                        errors=e.message,
+                        output_formatter=output_formatter_instance,
+                        wrapper=wrapper_instance,
+                        mimetype=mimetype
+                    )
+                    responses.append(response)
+
+            rm = ResponseMerger(
+                sapi_request=sapi_request,
+                responses=responses,
+            )
+            http_response = rm.build()
         except Exception, e:
-            if isinstance(e, (NamespaceException, RequestException,
-               ResponseException, RouteException, FeatureException)):
-                err_msg = unicode(e)
+            if isinstance(e, (NamespaceException, RequestException, \
+                              ResponseException, RouterException, \
+                              FeatureException)):
+                err_msg = repr(e)
             else:
                 err_msg = u'An internal error occurred during your request.'
-                trace = inspect.trace()
-                msgs = []
-                msgs.append('')
-                msgs.append(u"******* Exception raised *******")
-                msgs.append(u'Exception type: %s' % type(e))
-                msgs.append(u'Exception msg: %s' % e)
-                msgs.append('')
-                msgs.append(u'------- Traceback follows -------')
-                for idx, item in enumerate(trace):
-                    msgs.append(u"(%s)\t%s:%s (%s)" % (idx+1, item[3], item[2], item[1]))
-                    if item[4]:
-                        for line in item[4]:
-                            msgs.append(u"\t\t%s" % line.strip())
-                    msgs.append('') # blank line
-                msgs.append('     -- End of traceback --     ')
-                msgs.append('')
+            
+            trace = inspect.trace()
+            msgs = []
+            msgs.append('')
+            msgs.append(u"******* Exception raised *******")
+            msgs.append(u'Exception type: %s' % type(e))
+            msgs.append(u'Exception msg: %s' % repr(e))
+            msgs.append('')
+            msgs.append(u'------- Traceback follows -------')
+            for idx, item in enumerate(trace):
+                msgs.append(u"(%s)\t%s:%s (%s)" % 
+                    (idx+1, item[3], item[2], item[1]))
+                if item[4]:
+                    for line in item[4]:
+                        msgs.append(u"\t\t%s" % line.strip())
+                msgs.append('') # blank line
+            msgs.append('     -- End of traceback --     ')
+            msgs.append('')
+            self.logger.error("\n".join(msgs))
 
-                print "\n".join(msgs) # TODO: send it to the admins by email!
+            if self.debug:
+                e, m, tb = sys.exc_info()
+                pdb.post_mortem(tb)
 
             response = Response(
-                http_request,
+                sapi_request,
                 errors=err_msg,
                 output_formatter=output_formatter_instance,
                 wrapper=wrapper_instance,
                 mimetype=mimetype
             )
             http_response = response.build(skip_features=True)
+
+        if SIMPLEAPI_DEBUG and SIMPLEAPI_DEBUG_LEVEL == 'call':
+            self.profile_stop()
+            self.profile_stats()
 
         return http_response

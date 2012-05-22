@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
 
 import cPickle
+from common import json
+
 try:
-    import json
+    import yaml
+    has_yaml = True
 except ImportError:
-    import simplejson as json
+    has_yaml = False
 
 from py2xml import PythonToXML
+
+from sajson import SimpleAPIEncoder, SimpleAPIDecoder
 
 __all__ = ('formatters', 'Formatter')
 
@@ -57,10 +62,10 @@ formatters = FormattersSingleton()
 class Formatter(object):
     """Baseclass for Formatter-implementations"""
 
-    def __init__(self, http_request, callback):
+    def __init__(self, sapi_request, callback):
         """A Formatter takes the original http request (Django's one) and a
         callback name, e. g. for JSONP."""
-        self.http_request = http_request
+        self.sapi_request = sapi_request
         self.callback = callback
 
     def build(self, value):
@@ -83,7 +88,7 @@ class JSONFormatter(Formatter):
     __mime__ = "application/json"
 
     def build(self, value):
-        return json.dumps(value)
+        return json.dumps(value, cls=SimpleAPIEncoder)
 
     def kwargs(self, value, action='build'):
         if action == 'build':
@@ -92,7 +97,7 @@ class JSONFormatter(Formatter):
             return self.parse(value)
 
     def parse(self, value):
-        return json.loads(value)
+        return json.loads(value, cls=SimpleAPIDecoder)
 
 class JSONPFormatter(Formatter):
     """Formatter for JSONP-format. Used for cross-domain requests. If `callback`
@@ -102,16 +107,17 @@ class JSONPFormatter(Formatter):
 
     def build(self, value):
         func = self.callback or 'simpleapiCallback'
-        return u'%(func)s(%(data)s)' % {'func': func, 'data': json.dumps(value)}
+        result = u'%(func)s(%(data)s)' % {'func': func.decode("utf-8"), 'data': json.dumps(value)}
+        return result.encode("utf-8")
 
     def kwargs(self, value):
         if action == 'build':
-            return json.dumps(value)
+            return json.dumps(value, cls=SimpleAPIEncoder)
         elif action == 'parse':
             return self.parse(value)
 
     def parse(self, value):
-        return json.loads(value)
+        return json.loads(value, cls=SimpleAPIDecoder)
 
 class ValueFormatter(Formatter):
     """Basic formatter for simple, fast and tiny transports (it has a lot of
@@ -172,8 +178,25 @@ class XMLFormatter(Formatter):
     def parse(self, value):
         return PythonToXML().parse(value)
 
+class YAMLFormatter(Formatter):
+    __mime__ = "application/x-yaml"
+
+    def build(self, value):
+        return yaml.safe_dump(value)
+
+    def kwargs(self, value, action='build'):
+        if action == 'build':
+            return self.build(value)
+        elif action == 'parse':
+            return self.parse(value)
+
+    def parse(self, value):
+        return yaml.safe_load(value)
+
 formatters.register('json', JSONFormatter)
 formatters.register('jsonp', JSONPFormatter)
 formatters.register('value', ValueFormatter)
 formatters.register('pickle', PickleFormatter)
 formatters.register('xml', XMLFormatter)
+if has_yaml:
+    formatters.register('yaml', YAMLFormatter)

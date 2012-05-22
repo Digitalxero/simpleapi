@@ -9,6 +9,14 @@ except ImportError:
     import simplejson as json
 import cPickle
 
+try:
+    import django
+except ImportError:
+    raise Exception, 'Django is required for running the tests'
+
+import os
+os.environ['DJANGO_SETTINGS_MODULE'] = 'tests.settings'
+
 from simpleapi import *
 
 class RouteTest(unittest.TestCase):
@@ -75,7 +83,8 @@ class RouteTest(unittest.TestCase):
 
         class TestNamespace3(TestNamespace):
             __version__ = 3
-            __authentication__ = lambda namespace, access_key: access_key == 'a' * 5
+            __authentication__ = lambda namespace, access_key: \
+                access_key == 'a' * 5
 
         class TestNamespace4(TestNamespace):
             __version__ = 4
@@ -98,6 +107,7 @@ class RouteTest(unittest.TestCase):
         request = Request()
         request.method = 'POST'
         request.REQUEST = {}
+        request.FILES = {}
         request.META = {
             'REMOTE_ADDR': '127.0.0.1'
         }
